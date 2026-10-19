@@ -1,0 +1,124 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Dark theme tokens — SignalArc Cheers ─────────────── */
+:root {
+  /* Canvas */
+  --bg: #0d0e12;
+  --bg-gradient: linear-gradient(160deg, #0d0e12 0%, #111318 55%, #0f1117 100%);
+
+  /* Surfaces — charcoal with clear depth hierarchy */
+  --surface:        rgba(255, 255, 255, 0.055);
+  --surface-strong: rgba(255, 255, 255, 0.09);
+  --surface-muted:  #1a1c23;
+  --surface-card:   #16181f;
+  --surface-raised: #1e2029;
+
+  /* Text */
+  --ink:    #f0f0f0;
+  --ink-2:  #b8bfd0;
+  --muted:  #7a8299;
+  --subtle: #525870;
+
+  /* Borders */
+  --border:        rgba(255, 255, 255, 0.07);
+  --border-strong: rgba(255, 255, 255, 0.14);
+  --border-card:   rgba(255, 255, 255, 0.08);
+
+  /* Accents — warm amber primary, violet secondary */
+  --accent:        #D97706;   /* amber-600 */
+  --accent-hover:  #F59E0B;   /* amber-400 */
+  --accent-dim:    rgba(217, 119, 6, 0.15);
+  --violet:        #7C3AED;
+  --violet-dim:    rgba(124, 58, 237, 0.14);
+  --focus:         #F59E0B;
+
+  /* Semantic */
+  --success:      #22c55e;
+  --success-dim:  rgba(34, 197, 94, 0.14);
+  --danger:       #f87171;
+  --danger-dim:   rgba(248, 113, 113, 0.12);
+}
+
+/* ── Base reset ──────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: 'DM Sans', sans-serif;
+  min-height: 100dvh;
+  background: var(--bg-gradient);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Typography helpers ──────────────────────────────── */
+.display {
+  font-family: 'Space Grotesk', sans-serif;
+  letter-spacing: -0.03em;
+}
+
+.mono {
+  font-family: 'JetBrains Mono', Menlo, monospace;
+}
+
+/* ── Tabular numbers for all financial figures ───────── */
+.tabular { font-variant-numeric: tabular-nums; }
+
+/* ── Card surfaces (dark) ────────────────────────────── */
+.glass-card {
+  background: var(--surface-card);
+  border: 1px solid var(--border-card);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.4), 0 4px 16px rgba(0,0,0,0.25);
+}
+
+.glass-inner {
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+}
+
+/* ── Raised card (one step lighter than card) ────────── */
+.card-raised {
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.35);
+}
+
+/* ── Amber accent strip (replaces spectral for dark) ─── */
+.spectral-strip {
+  background: linear-gradient(90deg, #D97706, #7C3AED, #D97706);
+}
+
+/* ── Amber glow — used sparingly on hero amounts ─────── */
+.amber-glow {
+  text-shadow: 0 0 32px rgba(217, 119, 6, 0.35);
+}
+
+/* ── Divider ─────────────────────────────────────────── */
+.divider {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 0;
+}
+
+/* ── Focus ring ──────────────────────────────────────── */
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* ── Reduced motion ──────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ── Scrollbar (subtle) ──────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }

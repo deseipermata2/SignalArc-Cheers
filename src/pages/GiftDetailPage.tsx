@@ -37,6 +37,7 @@ import { useContractBytecode } from '../hooks/useContractBytecode'
 import { useGiftMetadata } from '../hooks/useGiftMetadata'
 import { buildAddressExplorerUrl } from '../onchain-facts'
 import { isApiConfigured } from '../lib/cheers-api'
+import { GiftMetadataRecoveryPanel } from '../components/GiftMetadataRecoveryPanel'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -551,26 +552,48 @@ export function GiftDetailPage({ giftId, onBack }: GiftDetailPageProps) {
 
         {/* Creator recovery: metadata missing but on-chain gift exists */}
         {isApiConfigured() && metaMissing && !meta && metaState === 'loaded' && (
-          <div
-            className="rounded-2xl px-5 py-4"
-            style={{ background: 'rgba(217,119,6,0.05)', border: '1px dashed rgba(217,119,6,0.25)' }}
-          >
-            <p className="text-sm font-medium mb-1" style={{ color: 'var(--ink-2)' }}>
-              Title not saved yet
-            </p>
-            <p className="text-xs" style={{ color: 'var(--muted)' }}>
-              This gift exists on-chain but no title has been saved.
-              If you created this gift and the save step did not complete, you can re-save the title
-              using your original transaction hash — no new payment needed.
-            </p>
-            <button
-              onClick={() => void reloadMeta()}
-              className="mt-2 text-xs font-semibold"
-              style={{ color: 'var(--accent)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
-            >
-              Try loading again
-            </button>
-          </div>
+          isConnected && walletAddress
+            ? (
+              <div
+                className="glass-card rounded-2xl overflow-hidden"
+              >
+                <div
+                  className="px-5 py-3 text-xs font-semibold"
+                  style={{
+                    color: 'var(--subtle)',
+                    letterSpacing: '0.08em',
+                    textTransform: 'uppercase',
+                    borderBottom: '1px solid var(--border)',
+                    background: 'rgba(255,255,255,0.025)',
+                  }}
+                >
+                  Save gift details
+                </div>
+                <div className="px-5 py-4">
+                  <GiftMetadataRecoveryPanel
+                    giftId={giftId}
+                    connectedWallet={walletAddress}
+                    onSaved={(_savedMeta) => {
+                      void reloadMeta()
+                    }}
+                  />
+                </div>
+              </div>
+            )
+            : (
+              <div
+                className="rounded-2xl px-5 py-4"
+                style={{ background: 'rgba(217,119,6,0.05)', border: '1px dashed rgba(217,119,6,0.25)' }}
+              >
+                <p className="text-sm font-medium mb-1" style={{ color: 'var(--ink-2)' }}>
+                  Title not saved
+                </p>
+                <p className="text-xs" style={{ color: 'var(--muted)' }}>
+                  This gift exists on-chain but no title has been saved.
+                  Connect the creator wallet to add a title — no new payment needed.
+                </p>
+              </div>
+            )
         )}
 
         {/* ── Accounting ────────────────────────────────────────── */}

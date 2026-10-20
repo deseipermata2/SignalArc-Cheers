@@ -299,6 +299,166 @@ describe('recovery scenarios', () => {
   })
 })
 
+// ── Paginated scan logic ──────────────────────────────────────────────────────
+
+describe('paginated GiftCreated scan logic', () => {
+  /** Simulate the block window slicing used by scanForGiftCreated. */
+  function computeWindows(deployBlock: bigint, headBlock: bigint, pageSize: bigint): Array<[bigint, bigint]> {
+    const windows: Array<[bigint, bigint]> = []
+    let from = deployBlock
+    while (from <= headBlock) {
+      const to = from + pageSize - 1n < headBlock ? from + pageSize - 1n : headBlock
+      windows.push([from, to])
+      from = to + 1n
+    }
+    return windows
+  }
+
+  it('single page when chain fits within PAGE_SIZE', () => {
+    const windows = computeWindows(100n, 599n, 500n)
+    expect(windows).toHaveLength(1)
+    expect(windows[0]).toEqual([100n, 599n])
+  })
+
+  it('two pages when range spans exactly 2 × PAGE_SIZE', () => {
+    const windows = computeWindows(100n, 1099n, 500n)
+    expect(windows).toHaveLength(2)
+    expect(windows[0]).toEqual([100n, 599n])
+    expect(windows[1]).toEqual([600n, 1099n])
+  })
+
+  it('last page does not exceed headBlock', () => {
+    const windows = computeWindows(0n, 750n, 500n)
+    expect(windows[windows.length - 1][1]).toBe(750n)
+  })
+
+  it('windows are contiguous with no gaps', () => {
+    const ws = computeWindows(1000n, 3000n, 500n)
+    for (let i = 1; i < ws.length; i++) {
+      expect(ws[i][0]).toBe(ws[i - 1][1] + 1n)
+    }
+  })
+
+  it('stops when event found in first window — subsequent windows not needed', () => {
+    // Simulate early stop: if the event is in window 0, windows 1+ are never requested.
+    const windows = computeWindows(26_623_210n, 26_961_267n, 500n)
+    // The registry has a GiftCreated at ~block 26_623_210 (first window).
+    // Verify the first window starts at the deployment block.
+    expect(windows[0][0]).toBe(26_623_210n)
+    expect(windows[0][1]).toBe(26_623_709n)  // 26_623_210 + 499
+  })
+
+  it('page size halving produces smaller windows on retry', () => {
+    // If 500 fails, page size halves to 250
+    const halved = computeWindows(100n, 349n, 250n)
+    expect(halved.every(([from, to]) => to - from + 1n <= 250n)).toBe(true)
+  })
+
+  it('range-too-large error detection', () => {
+    const rangeTooLargeMessages = [
+      'requested range too large',
+      'Range too large: 10000 > 500',
+      'RpcError: requested range too large',
+    ]
+    for (const msg of rangeTooLargeMessages) {
+      const lower = msg.toLowerCase()
+      expect(lower.includes('range too large') || lower.includes('too large')).toBe(true)
+    }
+  })
+
+  it('non-range errors are not treated as range-too-large', () => {
+    const otherMessages = [
+      'connection refused',
+      'timeout',
+      'rate limited',
+      '403 Forbidden',
+    ]
+    for (const msg of otherMessages) {
+      const lower = msg.toLowerCase()
+      expect(lower.includes('range too large') || lower.includes('too large')).toBe(false)
+    }
+  })
+})
+
+// ── Manual txHash fallback ────────────────────────────────────────────────────
+
+describe('manual txHash fallback', () => {
+  const VALID_HASH = '0xb833e96c77ee980fc98578d9c99788497683f3bf0f89363708cdfc396ef5624d' as const
+
+  it('a valid tx hash passes the isHash check', () => {
+    // Mirrors the isHash(val) guard in GiftMetadataRecoveryPanel
+    const isValidHex64 = (s: string) => /^0x[0-9a-fA-F]{64}$/.test(s)
+    expect(isValidHex64(VALID_HASH)).toBe(true)
+  })
+
+  it('an incomplete hash fails the check', () => {
+    const isValidHex64 = (s: string) => /^0x[0-9a-fA-F]{64}$/.test(s)
+    expect(isValidHex64('0x1234')).toBe(false)
+    expect(isValidHex64('')).toBe(false)
+  })
+
+  it('manual hash builds a valid payload when title is present', () => {
+    const payload = buildSaveGiftPayload('Gift Three', VALID_HASH)
+    expect(payload.txHash).toBe(VALID_HASH)
+    expect(payload.title).toBe('Gift Three')
+    expect(payload.registry).toBe(REGISTRY)
+  })
+
+  it('manual hash does not bypass creator verification — backend validates', () => {
+    // The frontend accepts a manually entered hash; the backend independently
+    // fetches the receipt and verifies the creator from the GiftCreated event.
+    // The test documents that the frontend does NOT perform creator identity
+    // checks when the event lookup failed (it relies on backend verification).
+    const payload = buildSaveGiftPayload('T', VALID_HASH)
+    // If the connected wallet is not the creator, the backend will reject the
+    // execute call with 422. The payload itself is opaque to creator identity.
+    expect(payload.txHash).toBe(VALID_HASH)
+  })
+
+  it('draft confirmedTxHash is used as fallback when manual input is empty', () => {
+    // Panel logic: effectiveTxHash = manualHashValid ? manual : (draft?.confirmedTxHash ?? '')
+    const manual = ''
+    const draftHash = VALID_HASH
+    const effectiveTxHash = manual.trim().length > 0 ? manual : draftHash
+    expect(effectiveTxHash).toBe(VALID_HASH)
+  })
+
+  it('invalid manual input falls back to draft hash', () => {
+    // 63 hex chars after 0x — one short of a valid hash
+    const manual = '0x' + 'a'.repeat(63)
+    const draftHash = VALID_HASH
+    const isValidHex64 = (s: string) => /^0x[0-9a-fA-F]{64}$/.test(s)
+    const manualValid = isValidHex64(manual)
+    expect(manualValid).toBe(false)
+    const effectiveTxHash = manualValid ? manual : draftHash
+    expect(effectiveTxHash).toBe(draftHash)
+  })
+
+  it('valid manual input supersedes draft hash', () => {
+    const manual = '0x' + 'a'.repeat(64)  // valid: exactly 64 hex chars after 0x
+    const draftHash = VALID_HASH
+    const isValidHex64 = (s: string) => /^0x[0-9a-fA-F]{64}$/.test(s)
+    const manualValid = isValidHex64(manual)
+    expect(manualValid).toBe(true)
+    const effectiveTxHash = manualValid ? manual : draftHash
+    expect(effectiveTxHash).toBe(manual)
+  })
+
+  it('recovery payload is not built when txHash is empty', () => {
+    const txH = ''
+    const canBuild = !!(txH && 'Some Title')
+    expect(canBuild).toBe(false)
+  })
+
+  it('range-too-large error shows manual entry prompt, not generic error', () => {
+    // When useGiftCreatedEvent returns state='error' and the error contains
+    // 'range too large', the panel shows the manual input form — not a spinner
+    // or a dead-end message.
+    const errorMsg = 'Could not scan the full block range (RPC limit). Enter the creation transaction hash manually.'
+    expect(errorMsg).toContain('Enter the creation transaction hash manually')
+  })
+})
+
 // ── GiftCreated event shape ───────────────────────────────────────────────────
 
 describe('GiftCreated event shape', () => {

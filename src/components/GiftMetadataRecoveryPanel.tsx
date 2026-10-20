@@ -3,24 +3,24 @@
  * record exists but whose Supabase metadata was never saved or failed to save.
  *
  * Flow:
- * 1. Fetch the GiftCreated event from the registry to obtain the canonical
- *    txHash and verify the connected wallet is the creator.
- * 2. Restore any persisted draft from localStorage (scoped to
+ * 1. Fetch the GiftCreated event from the registry using bounded block pagination.
+ * 2. When the event is found, confirm the connected wallet is the creator.
+ * 3. When event lookup fails (any error, including range limits), show a manual
+ *    transaction hash input so the recovery form is never blocked by an RPC error.
+ * 4. Restore any persisted draft from localStorage (scoped to
  *    chainId + registry + account + giftId).
- * 3. If no draft title exists, show MetadataForm to collect title /
- *    description / optional target.
- * 4. Persist the complete payload before requesting a signature so a
- *    reload or rejected signature does not lose recovery information.
- * 5. Render GiftMetaRecovery which drives the challenge → EIP-712 sign →
- *    execute flow.
- * 6. On success, call onSaved and clear only the matching draft.
+ * 5. Show MetadataForm to collect title / description / optional target.
+ * 6. Persist the complete payload before requesting a signature.
+ * 7. Render GiftMetaRecovery which drives the challenge → EIP-712 sign → execute flow.
+ * 8. On success, call onSaved and clear only the matching draft.
  *
  * This component never initiates a blockchain transaction.
  * It works for already-claimed gifts (phase CLOSED).
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { AlertTriangle, Loader2, Search } from 'lucide-react'
+import { AlertTriangle, Loader2, Search, Hash } from 'lucide-react'
+import { isHash } from 'viem'
 import {
   CHAIN_ID,
   registryAddress,
@@ -58,13 +58,11 @@ export function GiftMetadataRecoveryPanel({ giftId, connectedWallet, onSaved }: 
     ? draftKey({ chainId: CHAIN_ID, registry, account: connectedWallet, giftId, action: 'gift' })
     : null
 
-  // Load draft synchronously on first render (lazy initializer avoids set-state-in-effect).
-  // Re-load when dk changes (account or giftId changed) via a ref-guarded tick pattern.
+  // Load draft synchronously on first render.
   const lastDkRef = useRef<string | null>(null)
   const [draft, setDraft] = useState<GiftDraft | null>(() => (dk ? loadDraft<GiftDraft>(dk) : null))
 
   // ── 3. Form state ──────────────────────────────────────────────────────────
-  // Initialize fields from the draft loaded above (same lazy initializer trick).
   const [fields, setFields] = useState<GiftMetaFields>(() => {
     const stored = dk ? loadDraft<GiftDraft>(dk) : null
     return stored
@@ -73,25 +71,26 @@ export function GiftMetadataRecoveryPanel({ giftId, connectedWallet, onSaved }: 
   })
   const [errors, setErrors] = useState<GiftMetaErrors>(EMPTY_ERRORS)
 
+  // ── 4. Manual txHash input (fallback when event lookup fails) ───────────────
+  const [manualTxHash, setManualTxHash] = useState<string>(draft?.confirmedTxHash ?? '')
+  const [manualTxHashError, setManualTxHashError] = useState<string | null>(null)
+
   // When the scoped key changes (wallet or giftId changed), reload draft.
-  // Uses a ref to detect the change without a synchronous setState-in-effect.
   const [dkTick, setDkTick] = useState(0)
   useEffect(() => {
     if (lastDkRef.current !== dk) {
       lastDkRef.current = dk
-      setDkTick(t => t + 1)  // trigger re-read below via dkTick
+      setDkTick(t => t + 1)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dk])
 
-  // dkTick change → reload draft and fields via a scheduled microtask (avoids synchronous setState)
   const draftReloadedRef = useRef(false)
   useEffect(() => {
     if (dkTick === 0 && draftReloadedRef.current) return
     draftReloadedRef.current = true
     if (!dk) return
     const stored = loadDraft<GiftDraft>(dk)
-    // schedule the state updates so React batches them outside the effect body
     queueMicrotask(() => {
       setDraft(stored)
       if (stored) {
@@ -100,6 +99,7 @@ export function GiftMetadataRecoveryPanel({ giftId, connectedWallet, onSaved }: 
           description: stored.description ?? '',
           targetInput: stored.targetAmountRaw ?? '',
         })
+        if (stored.confirmedTxHash) setManualTxHash(stored.confirmedTxHash)
       }
     })
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -114,19 +114,34 @@ export function GiftMetadataRecoveryPanel({ giftId, connectedWallet, onSaved }: 
     setErrors(next)
   }, [])
 
-  // ── 4. Derived state ───────────────────────────────────────────────────────
-  const txHash = event?.txHash ?? draft?.confirmedTxHash
+  // ── 5. Derived state ───────────────────────────────────────────────────────
+  // Prefer event txHash; fall back to manually entered hash.
+  const txHashFromEvent = event?.txHash ?? null
+  const txHash = txHashFromEvent ?? (manualTxHash.trim() || draft?.confirmedTxHash) ?? undefined
+
   const isCreator = event
     ? event.creator.toLowerCase() === connectedWallet.toLowerCase()
-    : false
+    : true  // when event not available, allow manual entry; backend verifies creator
 
   const titleValue = fields.title.trim()
   const hasFormErrors = !!(errors.title || errors.description || errors.target)
 
+  const validateManualTxHash = useCallback((val: string): boolean => {
+    const v = val.trim()
+    if (!v) {
+      setManualTxHashError('Enter the transaction hash from your createGift transaction.')
+      return false
+    }
+    if (!isHash(v)) {
+      setManualTxHashError('Not a valid transaction hash. It should be 0x followed by 64 hex characters.')
+      return false
+    }
+    setManualTxHashError(null)
+    return true
+  }, [])
+
   const buildPayload = useCallback((txH: string): SaveGiftPayload | null => {
     if (!registry || !titleValue || hasFormErrors) return null
-    // Validate silently to confirm no errors; if validateMetadata sets errors we
-    // can't call setState here, so we only proceed when the current errors are clear.
     const derived = metaFieldsToPayload(fields)
     if (!derived.title) return null
     return {
@@ -171,59 +186,10 @@ export function GiftMetadataRecoveryPanel({ giftId, connectedWallet, onSaved }: 
     )
   }
 
-  // Event error or not found — fall back to draft txHash if available
-  if (eventState === 'error' || eventState === 'not-found') {
-    if (draft?.confirmedTxHash) {
-      const fallbackPayload = buildPayload(draft.confirmedTxHash)
-      return (
-        <div className="space-y-3">
-          <div className="rounded-xl px-4 py-3 text-xs flex items-start gap-2"
-            style={{ background: 'rgba(248,113,113,0.06)', border: '1px solid rgba(248,113,113,0.2)', color: 'var(--muted)' }}>
-            <AlertTriangle size={12} strokeWidth={2} className="mt-0.5 shrink-0" style={{ color: 'var(--danger)' }} />
-            <span>
-              Could not fetch the creation event{eventError ? `: ${eventError}` : ''}.
-              Using your saved transaction hash for recovery.
-            </span>
-          </div>
-          <MetadataForm fields={fields} errors={errors} onChange={handleFieldsChange} onErrorChange={handleErrorsChange} />
-          {fallbackPayload && !hasFormErrors && titleValue
-            ? <GiftMetaRecovery wallet={connectedWallet} payload={fallbackPayload} onSaved={handleSaved} />
-            : <p className="text-xs" style={{ color: 'var(--subtle)' }}>Enter a title above to enable recovery.</p>
-          }
-        </div>
-      )
-    }
-
-    return (
-      <div className="rounded-2xl px-5 py-4 space-y-3"
-        style={{ background: 'rgba(217,119,6,0.04)', border: '1px dashed rgba(217,119,6,0.2)' }}>
-        <div className="flex items-start gap-2">
-          <AlertTriangle size={14} strokeWidth={2} className="mt-0.5 shrink-0" style={{ color: 'var(--accent)' }} />
-          <div>
-            <p className="text-sm font-semibold" style={{ color: 'var(--ink-2)' }}>Title not saved</p>
-            <p className="text-xs mt-0.5 leading-relaxed" style={{ color: 'var(--muted)' }}>
-              {eventState === 'not-found'
-                ? 'The creation event for this gift was not found in the contract logs.'
-                : `Could not fetch the creation event: ${eventError ?? 'unknown error'}.`}
-              {' '}Connect the original creator wallet to enable recovery.
-            </p>
-          </div>
-        </div>
-        <button onClick={refetch}
-          className="flex items-center gap-1.5 text-xs font-semibold"
-          style={{ color: 'var(--accent)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
-          <Search size={11} strokeWidth={2.5} />
-          Try again
-        </button>
-      </div>
-    )
-  }
-
-  // Event found but not the creator
+  // Event not the creator
   if (eventState === 'ok' && !isCreator) {
     return (
-      <div className="rounded-2xl px-5 py-4"
-        style={{ background: 'rgba(217,119,6,0.04)', border: '1px dashed rgba(217,119,6,0.2)' }}>
+      <div className="rounded-2xl px-5 py-4" style={{ background: 'rgba(217,119,6,0.04)', border: '1px dashed rgba(217,119,6,0.2)' }}>
         <p className="text-sm font-semibold mb-1" style={{ color: 'var(--ink-2)' }}>Title not saved</p>
         <p className="text-xs leading-relaxed" style={{ color: 'var(--muted)' }}>
           Only the creator can save gift details. Connect the creator wallet to add a title.
@@ -232,23 +198,111 @@ export function GiftMetadataRecoveryPanel({ giftId, connectedWallet, onSaved }: 
     )
   }
 
-  // Creator confirmed — form + recovery
-  const confirmedPayload = txHash ? buildPayload(txHash) : null
+  // Event found — use canonical txHash from event
+  if (eventState === 'ok' && txHashFromEvent) {
+    const confirmedPayload = buildPayload(txHashFromEvent)
+    return (
+      <div className="space-y-3">
+        <MetadataForm
+          fields={fields}
+          errors={errors}
+          onChange={handleFieldsChange}
+          onErrorChange={handleErrorsChange}
+        />
+        {confirmedPayload && !hasFormErrors && titleValue
+          ? <GiftMetaRecovery wallet={connectedWallet} payload={confirmedPayload} onSaved={handleSaved} />
+          : <p className="text-xs" style={{ color: 'var(--subtle)' }}>
+              {titleValue ? 'Fix the errors above to continue.' : 'Enter a title above to save gift details.'}
+            </p>
+        }
+      </div>
+    )
+  }
+
+  // Event lookup failed or not-found — always show manual txHash input
+  // The form is never blocked; the creator can enter the txHash from their wallet history.
+  const manualHashValid = manualTxHash.trim().length > 0 && isHash(manualTxHash.trim())
+  const effectiveTxHash = manualHashValid ? manualTxHash.trim() : (draft?.confirmedTxHash ?? '')
+  const fallbackPayload = effectiveTxHash ? buildPayload(effectiveTxHash) : null
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
+      {/* Error notice — concise, no raw RPC details */}
+      <div className="rounded-xl px-4 py-3 text-xs flex items-start gap-2"
+        style={{ background: 'rgba(248,113,113,0.06)', border: '1px solid rgba(248,113,113,0.18)', color: 'var(--muted)' }}>
+        <AlertTriangle size={12} strokeWidth={2} className="mt-0.5 shrink-0" style={{ color: 'var(--danger)' }} />
+        <span>
+          {eventState === 'not-found'
+            ? 'Creation event not found in contract logs.'
+            : (eventError ?? 'Could not fetch the creation event.')}
+          {' '}Enter the transaction hash from your wallet history to continue.
+        </span>
+      </div>
+
+      {/* Manual txHash input — always available on error */}
+      <div>
+        <label className="block text-xs font-semibold mb-1.5" style={{ color: 'var(--ink-2)' }}>
+          <Hash size={11} strokeWidth={2.5} className="inline mr-1" />
+          Creation transaction hash
+        </label>
+        <input
+          type="text"
+          value={manualTxHash}
+          onChange={e => {
+            setManualTxHash(e.target.value)
+            if (e.target.value.trim()) setManualTxHashError(null)
+          }}
+          onBlur={() => { if (manualTxHash.trim()) validateManualTxHash(manualTxHash) }}
+          placeholder="0x..."
+          spellCheck={false}
+          className="w-full rounded-xl px-3 py-2.5 text-xs font-mono"
+          style={{
+            background: 'var(--surface-2)',
+            border: manualTxHashError ? '1px solid rgba(248,113,113,0.5)' : '1px solid var(--border)',
+            color: 'var(--ink-1)',
+            outline: 'none',
+          }}
+        />
+        {manualTxHashError && (
+          <p className="mt-1 text-xs" style={{ color: 'var(--danger)' }}>{manualTxHashError}</p>
+        )}
+        <p className="mt-1 text-xs" style={{ color: 'var(--subtle)' }}>
+          Find this hash in your wallet's transaction history on{' '}
+          <a href="https://explorer.arc.io" target="_blank" rel="noopener noreferrer"
+            style={{ color: 'var(--accent)', textDecoration: 'underline' }}>
+            explorer.arc.io
+          </a>.
+          This signature authorizes saving metadata only — no USDC transfer.
+        </p>
+      </div>
+
+      {/* Retry event lookup */}
+      <button
+        type="button"
+        onClick={refetch}
+        className="flex items-center gap-1.5 text-xs"
+        style={{ color: 'var(--muted)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+        <Search size={11} strokeWidth={2.5} />
+        Retry automatic lookup
+      </button>
+
+      {/* Metadata form */}
       <MetadataForm
         fields={fields}
         errors={errors}
         onChange={handleFieldsChange}
         onErrorChange={handleErrorsChange}
       />
-      {confirmedPayload && !hasFormErrors && titleValue
-        ? <GiftMetaRecovery wallet={connectedWallet} payload={confirmedPayload} onSaved={handleSaved} />
+
+      {/* Recovery action — enabled only when txHash + title are valid */}
+      {fallbackPayload && !hasFormErrors && titleValue && manualHashValid
+        ? <GiftMetaRecovery wallet={connectedWallet} payload={fallbackPayload} onSaved={handleSaved} />
         : <p className="text-xs" style={{ color: 'var(--subtle)' }}>
-            {titleValue
-              ? 'Fix the errors above to continue.'
-              : 'Enter a title above to save gift details.'}
+            {!effectiveTxHash
+              ? 'Enter the creation transaction hash above to continue.'
+              : !titleValue
+              ? 'Enter a title above to save gift details.'
+              : manualHashValid ? 'Fix the errors above to continue.' : 'Enter a valid transaction hash (0x… 64 hex chars).'}
           </p>
       }
     </div>
